@@ -2,10 +2,10 @@
 #
 # Moving hot-key experiment.
 #
-# One strategy: set STRATEGY (default | adaptive).
-# Sweep: RUN_ALL_STRATEGIES=1 runs default then adaptive (separate result dirs).
+# - One strategy: set STRATEGY (default | adaptive).
+# - Sweep: RUN_ALL_STRATEGIES=1 runs default then adaptive (separate result dirs).
 #
-# Results:
+# Results (per run):
 #   results/moving-hotkey/<YYYYMMDD_HHMMSS>_<pid>_<strategy>/
 #     metadata.txt
 #     lag_timeseries.tsv
@@ -16,24 +16,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib.sh
 source "$ROOT/scripts/lib.sh"
 
-# -----------------------------------------------------------------------------
-# Settings (edit for paper runs; one variable per line)
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Settings (one assignment per line; edit for paper runs)
+# =============================================================================
 
+# --- Kafka / topic ---
 BOOTSTRAP_SERVERS="${BOOTSTRAP_SERVERS:-localhost:9092}"
 TOPIC="${TOPIC:-moving-hotkey}"
 PARTITIONS="${PARTITIONS:-6}"
 CONSUMER_GROUP_BASE="${CONSUMER_GROUP_BASE:-moving-hotkey}"
 LAG_INTERVAL_SEC="${LAG_INTERVAL_SEC:-2}"
 
+# --- Workload (workload/dynamic-skew-generator.java) ---
 MESSAGES="${MESSAGES:-500000}"
 PHASE_MS="${PHASE_MS:-5000}"
 HOT_FRACTION="${HOT_FRACTION:-0.5}"
 KEY_SPACE="${KEY_SPACE:-10000}"
 
+# --- Partitioner strategy ---
 STRATEGY="${STRATEGY:-adaptive}"
 RUN_ALL_STRATEGIES="${RUN_ALL_STRATEGIES:-0}"
 
+# --- AdaptivePartitioner (JVM -D; ignored when STRATEGY=default) ---
 ADAPTIVE_ENABLE="${ADAPTIVE_ENABLE:-true}"
 ADAPTIVE_WINDOW_MS="${ADAPTIVE_WINDOW_MS:-10000}"
 ADAPTIVE_STICKY_TTL_MS="${ADAPTIVE_STICKY_TTL_MS:-30000}"
@@ -41,11 +45,12 @@ ADAPTIVE_IMBALANCE_FACTOR="${ADAPTIVE_IMBALANCE_FACTOR:-1.25}"
 ADAPTIVE_LOG_ENABLE="${ADAPTIVE_LOG_ENABLE:-false}"
 ADAPTIVE_LOG_SUMMARY_MS="${ADAPTIVE_LOG_SUMMARY_MS:-0}"
 
+# --- Infrastructure ---
 START_DOCKER="${START_DOCKER:-1}"
 
-# -----------------------------------------------------------------------------
-# Metadata
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Metadata (writes metadata.txt)
+# =============================================================================
 
 write_metadata() {
   local out_dir="$1"
@@ -73,9 +78,9 @@ write_metadata() {
   } | tee "$meta"
 }
 
-# -----------------------------------------------------------------------------
-# Build and producer
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Build and producer execution
+# =============================================================================
 
 build_and_run_producer() {
   local strategy="$1"
@@ -104,9 +109,9 @@ prepare_build() {
     "$ROOT/workload/dynamic-skew-generator.java"
 }
 
-# -----------------------------------------------------------------------------
-# One strategy run: consumer, lag file, producer, teardown
-# -----------------------------------------------------------------------------
+# =============================================================================
+# One strategy: consumer + lag file + producer + teardown (results on disk)
+# =============================================================================
 
 run_one_strategy() {
   local strategy="$1"
@@ -128,7 +133,6 @@ run_one_strategy() {
   }
   trap cleanup EXIT
 
-  # Consumer and lag sampler (fresh group per run / per strategy)
   TOPIC="$TOPIC" CONSUMER_GROUP="$CONSUMER_GROUP" \
     "$ROOT/scripts/start-background-consumer.sh" &
   cons_pid=$!
@@ -148,9 +152,9 @@ run_one_strategy() {
   echo "  python3 \"$ROOT/plots/generate_plots.py\" --lag-ts \"$LAG_FILE\" --lag-out \"$OUT/lag.png\""
 }
 
-# -----------------------------------------------------------------------------
-# Main: broker ready, topic exists, compile once, execute
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Setup: broker, topic, compile — then run experiment(s)
+# =============================================================================
 
 first_broker="${BOOTSTRAP_SERVERS%%,*}"
 KAFKA_WAIT_HOST="${first_broker%%:*}"
