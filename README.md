@@ -18,7 +18,7 @@ Research artifact for the paper **“Adaptive Partitioning under Dynamic Workloa
 
 ## Reproducible paper run
 
-Use the **same** shell for the sequence below (from the repository root). The broker image is **pinned** in `docker-compose.yml`; override only if you document the alternative.
+Use the **same** shell for the sequence below (from the repository root). `docker-compose.yml` pins the broker image (**`apache/kafka:4.0.1`** by default); override with `KAFKA_IMAGE` only if you document the change.
 
 ```bash
 # 1) Broker

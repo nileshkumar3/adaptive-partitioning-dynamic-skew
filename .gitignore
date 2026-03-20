@@ -1,0 +1,34 @@
+# Maven / Java
+target/
+loadgen/target/
+build/
+*.class
+*.jar
+hs_err_pid*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Logs and scratch
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# IDE / OS / editor swap
+.idea/
+*.iml
+.vscode/
+.DS_Store
+*~
+*.swp
+*.swo
+Thumbs.db
+
+# Matplotlib / local caches (optional)
+.mplconfig/
+.cache/

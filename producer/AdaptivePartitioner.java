@@ -20,13 +20,20 @@ import org.apache.kafka.common.utils.Utils;
  * flip-flopping per key. When adaptation is off, behavior matches default hash routing (plus a
  * simple random choice for null keys), without maintaining window counts.
  *
- * <p>Implementation notes for experiments: least-loaded choice uses a one-pass <b>random tie-break</b>
- * among equal minimum counts (no low-index bias). Expired sticky-map entries are dropped on
- * TTL during occasional batched scans (not every record). For long runs, keep {@code adaptive.log.enable}
- * false and optionally set {@code adaptive.log.summary.ms} {@literal >} 0 for periodic aggregate routing
- * lines on stderr.
+ * <p>Experiment behavior: {@link #leastLoadedPartition(int)} only <em>selects</em> a partition (no counter
+ * updates). Exactly one {@code windowCounts} increment happens per routed record via {@link #recordOnce}.
+ * Least-loaded ties use uniform random choice among equal minima. {@code adaptive.window.ms} {@literal >} 0
+ * resets counts on a wall-clock epoch; {@code <= 0} disables that reset (cumulative window — see field).
  */
 public class AdaptivePartitioner implements Partitioner {
+
+    /** Defaults applied in {@link #configure(Map)} when a key is absent from config and system properties. */
+    private static final boolean DEFAULT_ADAPTIVE_ENABLE = true;
+    private static final long DEFAULT_STICKY_TTL_MS = 30_000L;
+    private static final double DEFAULT_IMBALANCE_FACTOR = 1.25;
+    private static final long DEFAULT_WINDOW_MS = 10_000L;
+    private static final boolean DEFAULT_LOG_ENABLE = false;
+    private static final long DEFAULT_LOG_SUMMARY_MS = 0L;
 
     public static final String ADAPTIVE_ENABLE = "adaptive.enable";
     public static final String ADAPTIVE_STICKY_TTL_MS = "adaptive.sticky.ttl.ms";
@@ -36,12 +43,14 @@ public class AdaptivePartitioner implements Partitioner {
     /** If {@code > 0}, one stderr summary line per interval (routes + map size); no per-record spam. */
     public static final String ADAPTIVE_LOG_SUMMARY_MS = "adaptive.log.summary.ms";
 
-    private volatile boolean adaptiveEnabled = true;
-    private volatile long stickyTtlMs = 30_000;
-    private volatile double imbalanceFactor = 1.25;
-    private volatile long windowMs = 10_000;
-    private volatile boolean logEnabled;
-    private volatile long logSummaryMs;
+    /** Filled from {@link #configure(Map)} before any {@link #partition} call. */
+    private volatile boolean adaptiveEnabled = DEFAULT_ADAPTIVE_ENABLE;
+    private volatile long stickyTtlMs = DEFAULT_STICKY_TTL_MS;
+    private volatile double imbalanceFactor = DEFAULT_IMBALANCE_FACTOR;
+    /** {@code <= 0}: no epoch reset — window counts grow for the producer lifetime (research option). */
+    private volatile long windowMs = DEFAULT_WINDOW_MS;
+    private volatile boolean logEnabled = DEFAULT_LOG_ENABLE;
+    private volatile long logSummaryMs = DEFAULT_LOG_SUMMARY_MS;
 
     private final ConcurrentHashMap<String, Sticky> stickyByKey = new ConcurrentHashMap<>();
     /** Batched expired-sticky purge (see {@link #maybeOpportunisticPruneStickies(long)}). */
@@ -62,12 +71,18 @@ public class AdaptivePartitioner implements Partitioner {
 
     @Override
     public void configure(Map<String, ?> configs) {
-        adaptiveEnabled = parseBool(cfg(configs, ADAPTIVE_ENABLE, "true"), true);
-        stickyTtlMs = parseLong(cfg(configs, ADAPTIVE_STICKY_TTL_MS, "30000"), 30_000);
-        imbalanceFactor = parseDouble(cfg(configs, ADAPTIVE_IMBALANCE_FACTOR, "1.25"), 1.25);
-        windowMs = parseLong(cfg(configs, ADAPTIVE_WINDOW_MS, "10000"), 10_000);
-        logEnabled = parseBool(cfg(configs, ADAPTIVE_LOG_ENABLE, "false"), false);
-        logSummaryMs = parseLong(cfg(configs, ADAPTIVE_LOG_SUMMARY_MS, "0"), 0);
+        adaptiveEnabled =
+                parseBool(cfg(configs, ADAPTIVE_ENABLE, Boolean.toString(DEFAULT_ADAPTIVE_ENABLE)), DEFAULT_ADAPTIVE_ENABLE);
+        stickyTtlMs =
+                parseLong(cfg(configs, ADAPTIVE_STICKY_TTL_MS, Long.toString(DEFAULT_STICKY_TTL_MS)), DEFAULT_STICKY_TTL_MS);
+        imbalanceFactor = parseDouble(
+                cfg(configs, ADAPTIVE_IMBALANCE_FACTOR, Double.toString(DEFAULT_IMBALANCE_FACTOR)),
+                DEFAULT_IMBALANCE_FACTOR);
+        windowMs = parseLong(cfg(configs, ADAPTIVE_WINDOW_MS, Long.toString(DEFAULT_WINDOW_MS)), DEFAULT_WINDOW_MS);
+        logEnabled =
+                parseBool(cfg(configs, ADAPTIVE_LOG_ENABLE, Boolean.toString(DEFAULT_LOG_ENABLE)), DEFAULT_LOG_ENABLE);
+        logSummaryMs = parseLong(
+                cfg(configs, ADAPTIVE_LOG_SUMMARY_MS, Long.toString(DEFAULT_LOG_SUMMARY_MS)), DEFAULT_LOG_SUMMARY_MS);
         lastSummaryAtMs = System.currentTimeMillis();
     }
 
@@ -101,8 +116,8 @@ public class AdaptivePartitioner implements Partitioner {
         maybeOpportunisticPruneStickies(now);
 
         if (keyBytes == null) {
-            int p = argminPartition(n);
-            recordOnce(p, "NULL_KEY_LEAST_LOADED", "null key → argmin window load", keyBytes);
+            int p = leastLoadedPartition(n);
+            recordOnce(p, "NULL_KEY_LEAST_LOADED", "null key → least-loaded partition", keyBytes);
             maybeSummary();
             return p;
         }
@@ -130,7 +145,7 @@ public class AdaptivePartitioner implements Partitioner {
             return hashPart;
         }
 
-        int alt = argminPartition(n);
+        int alt = leastLoadedPartition(n);
         stickyByKey.put(keyStr, new Sticky(alt, now));
         recordOnce(
                 alt,
@@ -221,6 +236,7 @@ public class AdaptivePartitioner implements Partitioner {
         return Utils.toPositive(Utils.murmur2(keyBytes)) % n;
     }
 
+    /** Resets {@link #windowCounts} when {@link #windowMs} ms have elapsed (only called if windowMs {@literal >} 0). */
     private void maybeRotateWindow(long now, int n) {
         if (now - windowStartMs < windowMs) {
             return;
@@ -281,10 +297,10 @@ public class AdaptivePartitioner implements Partitioner {
     }
 
     /**
-     * Argmin over window counts in one pass; among equal minima chooses uniformly at random (no bias to
-     * low indices). Same distribution as reservoir sampling for the argmin tie set.
+     * Chooses a least-loaded partition from current {@link #windowCounts} only — does <b>not</b> increment.
+     * Ties: uniform random among equal minima (one pass).
      */
-    private int argminPartition(int n) {
+    private int leastLoadedPartition(int n) {
         if (n <= 0) {
             return 0;
         }
@@ -308,13 +324,27 @@ public class AdaptivePartitioner implements Partitioner {
         return chosen;
     }
 
+    /**
+     * Reads custom keys from the partitioner config map (Kafka may pass String, Number, Boolean) then
+     * {@link System#getProperty}, then {@code defaultVal}.
+     */
     private static String cfg(Map<String, ?> configs, String key, String defaultVal) {
         Object v = configs.get(key);
         if (v != null) {
-            return v.toString();
+            if (v instanceof String str) {
+                return str.isBlank() ? defaultVal : str;
+            }
+            if (v instanceof Number || v instanceof Boolean) {
+                return String.valueOf(v);
+            }
+            String s = v.toString();
+            return s.isBlank() ? defaultVal : s;
         }
         String s = System.getProperty(key);
-        return s != null ? s : defaultVal;
+        if (s != null && !s.isBlank()) {
+            return s;
+        }
+        return defaultVal;
     }
 
     private static boolean parseBool(String s, boolean def) {

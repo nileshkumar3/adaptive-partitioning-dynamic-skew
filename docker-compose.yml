@@ -1,7 +1,7 @@
 # Single-node KRaft broker; adapted from Apache Kafka docker examples.
 # https://github.com/apache/kafka/blob/trunk/docker/examples/docker-compose-files/single-node/plaintext/docker-compose.yml
 #
-# Pinned image for experiment reproducibility (avoids :latest drift across pulls and image rebuilds).
+# Pinned for reproducibility: default apache/kafka:4.0.1 (avoid :latest drift). Override with KAFKA_IMAGE if needed.
 services:
   broker:
     image: ${KAFKA_IMAGE:-apache/kafka:4.0.1}
