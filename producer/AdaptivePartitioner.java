@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import org.apache.kafka.clients.producer.Partitioner;
 import org.apache.kafka.common.Cluster;
@@ -25,19 +26,30 @@ public class AdaptivePartitioner implements Partitioner {
     public static final String ADAPTIVE_IMBALANCE_FACTOR = "adaptive.imbalance.factor";
     public static final String ADAPTIVE_WINDOW_MS = "adaptive.window.ms";
     public static final String ADAPTIVE_LOG_ENABLE = "adaptive.log.enable";
+    /** If {@code > 0}, one stderr summary line per interval (routes + map size); no per-record spam. */
+    public static final String ADAPTIVE_LOG_SUMMARY_MS = "adaptive.log.summary.ms";
 
     private volatile boolean adaptiveEnabled = true;
     private volatile long stickyTtlMs = 30_000;
     private volatile double imbalanceFactor = 1.25;
     private volatile long windowMs = 10_000;
     private volatile boolean logEnabled;
+    private volatile long logSummaryMs;
 
     private final ConcurrentHashMap<String, Sticky> stickyByKey = new ConcurrentHashMap<>();
     private final Object windowLock = new Object();
+    private final Object summaryLock = new Object();
     private volatile AtomicLongArray windowCounts = new AtomicLongArray(0);
     private volatile int numPartitions = -1;
     /** Wall-clock start of the current load window; counts are reset when the window elapses. */
     private volatile long windowStartMs;
+
+    private volatile long lastSummaryAtMs;
+    private final AtomicLong routeSticky = new AtomicLong();
+    private final AtomicLong routeHash = new AtomicLong();
+    private final AtomicLong routeReroute = new AtomicLong();
+    private final AtomicLong routeNullKey = new AtomicLong();
+    private final AtomicLong routeDisabled = new AtomicLong();
 
     @Override
     public void configure(Map<String, ?> configs) {
@@ -46,6 +58,8 @@ public class AdaptivePartitioner implements Partitioner {
         imbalanceFactor = parseDouble(cfg(configs, ADAPTIVE_IMBALANCE_FACTOR, "1.25"), 1.25);
         windowMs = parseLong(cfg(configs, ADAPTIVE_WINDOW_MS, "10000"), 10_000);
         logEnabled = parseBool(cfg(configs, ADAPTIVE_LOG_ENABLE, "false"), false);
+        logSummaryMs = parseLong(cfg(configs, ADAPTIVE_LOG_SUMMARY_MS, "0"), 0);
+        lastSummaryAtMs = System.currentTimeMillis();
     }
 
     @Override
@@ -65,6 +79,8 @@ public class AdaptivePartitioner implements Partitioner {
         if (!adaptiveEnabled) {
             int p = keyedOrRandomPartition(keyBytes, n);
             trace("DISABLED_DEFAULT", p, "adaptive.enable=false", keyBytes);
+            noteRoute("DISABLED_DEFAULT");
+            maybeSummary();
             return p;
         }
 
@@ -75,17 +91,21 @@ public class AdaptivePartitioner implements Partitioner {
         }
 
         if (keyBytes == null) {
-            // No key: spread load by least-loaded in the current window (counts updated once below).
             int p = argminPartition(n);
             recordOnce(p, "NULL_KEY_LEAST_LOADED", "null key → argmin window load", keyBytes);
+            maybeSummary();
             return p;
         }
 
         String keyStr = new String(keyBytes, StandardCharsets.UTF_8);
         Sticky sticky = stickyByKey.get(keyStr);
-        if (sticky != null && now - sticky.sinceMs < stickyTtlMs) {
-            recordOnce(sticky.partition, "STICKY", "within sticky TTL", keyBytes);
-            return sticky.partition;
+        if (sticky != null) {
+            if (now - sticky.sinceMs < stickyTtlMs) {
+                recordOnce(sticky.partition, "STICKY", "within sticky TTL", keyBytes);
+                maybeSummary();
+                return sticky.partition;
+            }
+            stickyByKey.remove(keyStr, sticky);
         }
 
         int hashPart = murmurPartition(keyBytes, n);
@@ -96,6 +116,7 @@ public class AdaptivePartitioner implements Partitioner {
         if (hashLoad <= threshold) {
             stickyByKey.put(keyStr, new Sticky(hashPart, now));
             recordOnce(hashPart, "HASH", "hash partition within threshold (≤ mean×imbalance)", keyBytes);
+            maybeSummary();
             return hashPart;
         }
 
@@ -108,16 +129,66 @@ public class AdaptivePartitioner implements Partitioner {
                         "hash p=%d load=%d > threshold=%.1f (mean=%.1f) → p=%d",
                         hashPart, hashLoad, threshold, mean, alt),
                 keyBytes);
+        maybeSummary();
         return alt;
+    }
+
+    private void noteRoute(String route) {
+        if (logSummaryMs <= 0) {
+            return;
+        }
+        if ("DISABLED_DEFAULT".equals(route)) {
+            routeDisabled.incrementAndGet();
+        }
     }
 
     /** Increments the chosen partition’s window counter exactly once and optionally logs. */
     private void recordOnce(int partition, String route, String detail, byte[] keyBytes) {
         windowCounts.incrementAndGet(partition);
         trace(route, partition, detail, keyBytes);
+        bumpRouteCounter(route);
     }
 
-    /** stderr trace line; off unless adaptive.log.enable (avoids JUL handler setup). */
+    private void bumpRouteCounter(String route) {
+        if (logSummaryMs <= 0) {
+            return;
+        }
+        switch (route) {
+            case "STICKY" -> routeSticky.incrementAndGet();
+            case "HASH" -> routeHash.incrementAndGet();
+            case "REROUTE" -> routeReroute.incrementAndGet();
+            case "NULL_KEY_LEAST_LOADED" -> routeNullKey.incrementAndGet();
+            default -> {
+                /* DISABLED counted in noteRoute */
+            }
+        }
+    }
+
+    private void maybeSummary() {
+        if (logSummaryMs <= 0) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastSummaryAtMs < logSummaryMs) {
+            return;
+        }
+        synchronized (summaryLock) {
+            if (now - lastSummaryAtMs < logSummaryMs) {
+                return;
+            }
+            lastSummaryAtMs = now;
+            long s = routeSticky.getAndSet(0);
+            long h = routeHash.getAndSet(0);
+            long r = routeReroute.getAndSet(0);
+            long n = routeNullKey.getAndSet(0);
+            long d = routeDisabled.getAndSet(0);
+            System.err.printf(
+                    "AdaptivePartitioner summary intervalMs=%d sticky=%d hash=%d reroute=%d nullKey=%d disabled=%d stickyMapSize=%d%n",
+                    logSummaryMs, s, h, r, n, d, stickyByKey.size());
+        }
+    }
+
+    /** stderr trace line; off unless adaptive.log.enable. */
     private void trace(String route, int partition, String detail, byte[] keyBytes) {
         if (!logEnabled) {
             return;
@@ -152,7 +223,13 @@ public class AdaptivePartitioner implements Partitioner {
                 windowCounts.set(i, 0);
             }
             windowStartMs = now;
+            pruneExpiredStickies(now);
         }
+    }
+
+    /** Drop expired stickies when the load window rolls (keeps map from growing without a full scan per record). */
+    private void pruneExpiredStickies(long now) {
+        stickyByKey.entrySet().removeIf(e -> now - e.getValue().sinceMs >= stickyTtlMs);
     }
 
     private void ensureCounters(int n) {
@@ -180,18 +257,36 @@ public class AdaptivePartitioner implements Partitioner {
         return (double) sum / n;
     }
 
-    /** Partition with smallest window count; ties broken by lowest index (deterministic). */
+    /**
+     * Argmin over window load; ties among minimal-load partitions resolved uniformly at random (no
+     * partition-0 bias).
+     */
     private int argminPartition(int n) {
-        int best = 0;
         long bestVal = Long.MAX_VALUE;
         for (int i = 0; i < n; i++) {
             long v = windowCounts.get(i);
             if (v < bestVal) {
                 bestVal = v;
-                best = i;
             }
         }
-        return best;
+        int ties = 0;
+        for (int i = 0; i < n; i++) {
+            if (windowCounts.get(i) == bestVal) {
+                ties++;
+            }
+        }
+        if (ties == 0) {
+            return 0;
+        }
+        int pick = ThreadLocalRandom.current().nextInt(ties);
+        for (int i = 0; i < n; i++) {
+            if (windowCounts.get(i) == bestVal) {
+                if (pick-- == 0) {
+                    return i;
+                }
+            }
+        }
+        return 0;
     }
 
     private static String cfg(Map<String, ?> configs, String key, String defaultVal) {

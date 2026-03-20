@@ -16,57 +16,47 @@ Research artifact for the paper **“Adaptive Partitioning under Dynamic Workloa
 | `plots/generate_plots.py` | Bar chart for `throughput.txt`; time series for `lag_timeseries.tsv` (use `--lag-ts` for per-run files). |
 | `paper/` | LaTeX draft. |
 
-## Quickstart
+## Reproducible paper run
+
+Use the **same** shell for the sequence below (from the repository root). The broker image is **pinned** in `docker-compose.yml`; override only if you document the alternative.
+
+```bash
+# 1) Broker
+./scripts/kafka-setup.sh
+
+# 2) Topic
+export TOPIC=${TOPIC:-moving-hotkey} PARTITIONS=${PARTITIONS:-6}
+./scripts/create-topic.sh
+
+# 3–4) Moving–hot-key load + consumer + lag (script starts consumer and sampler)
+chmod +x experiments/run-moving-hotkey.sh   # once
+RUN_ALL_STRATEGIES=1 ./experiments/run-moving-hotkey.sh   # default then adaptive; or STRATEGY=adaptive only
+
+# 5) Plot (use the path printed at end of the run, or list results/moving-hotkey/)
+python3 plots/generate_plots.py --lag-ts results/moving-hotkey/<run_dir>/lag_timeseries.tsv \
+  --lag-out results/moving-hotkey/<run_dir>/lag.png
+```
+
+Each run directory includes **`metadata.txt`** (`git_commit`, strategy, topic, partitions, workload and adaptive settings) and **`lag_timeseries.tsv`**.
+
+**GitHub:** set the repository **description** and **topics** in the GitHub UI (not stored in git).
+
+## Quickstart (reference)
 
 **Prerequisites:** Docker (for broker), Java 21+ and Maven (for classpath + `loadgen`), Python 3 + matplotlib for plots.
 
-### 1. Start Kafka
+`run-moving-hotkey.sh` starts Kafka only if `START_DOCKER=1` (default) and `KAFKA_HOME` is unset; it creates the topic, compiles `producer/` + `workload/`, runs the moving-hot-key driver, and writes under `results/moving-hotkey/`.
 
-```bash
-./scripts/kafka-setup.sh
-```
-
-Uses `docker-compose.yml` (override with `KAFKA_HOME` and existing broker if you prefer).
-
-### 2. Create a topic
-
-```bash
-export TOPIC=skew-topic PARTITIONS=6
-./scripts/create-topic.sh
-```
-
-### 3. Background consumer (for lag)
-
-In one terminal (or let `run-moving-hotkey` start it):
-
-```bash
-export TOPIC=skew-topic CONSUMER_GROUP=skew-consumer
-./scripts/start-background-consumer.sh
-```
-
-### 4. Moving hot key experiment
-
-```bash
-chmod +x experiments/run-moving-hotkey.sh   # once
-./experiments/run-moving-hotkey.sh
-```
-
-Tune parameters at the top of `experiments/run-moving-hotkey.sh` (message count, phase, hot fraction, `STRATEGY=default|adaptive`, adaptive `-D` flags). Each run writes under `results/moving-hotkey/<timestamp>_<strategy>/`.
-
-### 5. Collect results
-
-`run-moving-hotkey.sh` records `run_config.txt` and `lag_timeseries.tsv` in that directory. For manual lag sampling:
+Manual lag sampling if needed:
 
 ```bash
 ./scripts/collect-lag.sh <group_id> 2 results/lag_timeseries.tsv
 ```
 
-### 6. Plots
+Default throughput + lag overview:
 
 ```bash
 python3 plots/generate_plots.py
-# Or for one experiment run:
-python3 plots/generate_plots.py --lag-ts results/moving-hotkey/<run>/lag_timeseries.tsv --lag-out results/moving-hotkey/<run>/lag.png
 ```
 
 ## Adaptive partitioner configuration
@@ -80,6 +70,7 @@ python3 plots/generate_plots.py --lag-ts results/moving-hotkey/<run>/lag_timeser
 | `adaptive.imbalance.factor` | Reroute if hash-partition window load `> mean × factor`. |
 | `adaptive.window.ms` | Sliding window length for load counters (`≤0` = never reset). |
 | `adaptive.log.enable` | `true` prints one stderr line per record (heavy); use short runs only. |
+| `adaptive.log.summary.ms` | If `> 0`, one stderr **summary** line per interval (route counts + sticky map size); use instead of per-record logs for long runs. |
 
 **Paper caveat:** rerouting breaks strict single-partition ordering per key; sticky TTL trades skew vs. ordering.
 
