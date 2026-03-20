@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import org.apache.kafka.clients.producer.Partitioner;
@@ -37,6 +38,8 @@ public class AdaptivePartitioner implements Partitioner {
     private volatile long logSummaryMs;
 
     private final ConcurrentHashMap<String, Sticky> stickyByKey = new ConcurrentHashMap<>();
+    /** Batched expired-sticky purge (see {@link #maybeOpportunisticPruneStickies(long)}). */
+    private final AtomicInteger stickyPrunePhase = new AtomicInteger();
     private final Object windowLock = new Object();
     private final Object summaryLock = new Object();
     private volatile AtomicLongArray windowCounts = new AtomicLongArray(0);
@@ -89,6 +92,7 @@ public class AdaptivePartitioner implements Partitioner {
         if (windowMs > 0) {
             maybeRotateWindow(now, n);
         }
+        maybeOpportunisticPruneStickies(now);
 
         if (keyBytes == null) {
             int p = argminPartition(n);
@@ -153,14 +157,14 @@ public class AdaptivePartitioner implements Partitioner {
         if (logSummaryMs <= 0) {
             return;
         }
-        switch (route) {
-            case "STICKY" -> routeSticky.incrementAndGet();
-            case "HASH" -> routeHash.incrementAndGet();
-            case "REROUTE" -> routeReroute.incrementAndGet();
-            case "NULL_KEY_LEAST_LOADED" -> routeNullKey.incrementAndGet();
-            default -> {
-                /* DISABLED counted in noteRoute */
-            }
+        if ("STICKY".equals(route)) {
+            routeSticky.incrementAndGet();
+        } else if ("HASH".equals(route)) {
+            routeHash.incrementAndGet();
+        } else if ("REROUTE".equals(route)) {
+            routeReroute.incrementAndGet();
+        } else if ("NULL_KEY_LEAST_LOADED".equals(route)) {
+            routeNullKey.incrementAndGet();
         }
     }
 
@@ -227,7 +231,20 @@ public class AdaptivePartitioner implements Partitioner {
         }
     }
 
-    /** Drop expired stickies when the load window rolls (keeps map from growing without a full scan per record). */
+    /**
+     * Periodic purge of TTL-expired stickies (cheap full map scan at low rate). Catches entries for keys
+     * that never reappear, and covers {@code adaptive.window.ms <= 0} where window rollover never runs.
+     */
+    private void maybeOpportunisticPruneStickies(long now) {
+        if ((stickyPrunePhase.incrementAndGet() & 0x1FFF) != 0) {
+            return;
+        }
+        synchronized (windowLock) {
+            pruneExpiredStickies(now);
+        }
+    }
+
+    /** Remove stickies past TTL (safe to call under {@link #windowLock}). */
     private void pruneExpiredStickies(long now) {
         stickyByKey.entrySet().removeIf(e -> now - e.getValue().sinceMs >= stickyTtlMs);
     }
@@ -258,35 +275,31 @@ public class AdaptivePartitioner implements Partitioner {
     }
 
     /**
-     * Argmin over window load; ties among minimal-load partitions resolved uniformly at random (no
-     * partition-0 bias).
+     * Argmin over window counts in one pass; among equal minima chooses uniformly at random (no bias to
+     * low indices). Same distribution as reservoir sampling for the argmin tie set.
      */
     private int argminPartition(int n) {
-        long bestVal = Long.MAX_VALUE;
-        for (int i = 0; i < n; i++) {
-            long v = windowCounts.get(i);
-            if (v < bestVal) {
-                bestVal = v;
-            }
-        }
-        int ties = 0;
-        for (int i = 0; i < n; i++) {
-            if (windowCounts.get(i) == bestVal) {
-                ties++;
-            }
-        }
-        if (ties == 0) {
+        if (n <= 0) {
             return 0;
         }
-        int pick = ThreadLocalRandom.current().nextInt(ties);
+        long min = Long.MAX_VALUE;
+        int tieCount = 0;
+        int chosen = 0;
+        ThreadLocalRandom rng = ThreadLocalRandom.current();
         for (int i = 0; i < n; i++) {
-            if (windowCounts.get(i) == bestVal) {
-                if (pick-- == 0) {
-                    return i;
+            long v = windowCounts.get(i);
+            if (v < min) {
+                min = v;
+                tieCount = 1;
+                chosen = i;
+            } else if (v == min) {
+                tieCount++;
+                if (rng.nextInt(tieCount) == 0) {
+                    chosen = i;
                 }
             }
         }
-        return 0;
+        return chosen;
     }
 
     private static String cfg(Map<String, ?> configs, String key, String defaultVal) {
