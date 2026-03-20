@@ -39,7 +39,9 @@ python3 plots/generate_plots.py --lag-ts results/moving-hotkey/<run_dir>/lag_tim
 
 Each run directory includes **`metadata.txt`** (`git_commit`, strategy, topic, partitions, workload and adaptive settings) and **`lag_timeseries.tsv`**.
 
-**GitHub:** set the repository **description** and **topics** in the GitHub UI (not stored in git).
+**Paper runs:** keep **`adaptive.log.enable=false`** (default). Per-record stderr traces dominate I/O; for lightweight telemetry set **`adaptive.log.summary.ms`** to an interval (e.g. `10000`) instead of enabling per-record logging.
+
+**Repository metadata:** the GitHub **description** and **topics** for this artifact must be set manually in the repo **Settings** (they are not stored in these files).
 
 ## Quickstart (reference)
 

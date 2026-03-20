@@ -19,6 +19,12 @@ import org.apache.kafka.common.utils.Utils;
  * partition is hotter than the cluster mean by an imbalance factor. Sticky routing (TTL) limits
  * flip-flopping per key. When adaptation is off, behavior matches default hash routing (plus a
  * simple random choice for null keys), without maintaining window counts.
+ *
+ * <p>Implementation notes for experiments: least-loaded choice uses a one-pass <b>random tie-break</b>
+ * among equal minimum counts (no low-index bias). Expired sticky-map entries are dropped on
+ * TTL during occasional batched scans (not every record). For long runs, keep {@code adaptive.log.enable}
+ * false and optionally set {@code adaptive.log.summary.ms} {@literal >} 0 for periodic aggregate routing
+ * lines on stderr.
  */
 public class AdaptivePartitioner implements Partitioner {
 

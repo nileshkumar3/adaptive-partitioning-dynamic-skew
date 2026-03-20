@@ -1,22 +1,25 @@
-# Load generator (Kafka producer)
+# Load generator (`loadgen/`)
 
-This module supports experiments for **Adaptive Partitioning under Dynamic Workload Skew in Event-Driven Systems**. It is a **multi-threaded, rate-controlled** producer that reports **throughput and producer-side acknowledgment latencies** (p50 / p95 / p99).
+Maven module for the artifact **“Adaptive Partitioning under Dynamic Workload Skew in Event-Driven Systems.”** It provides **`KafkaLoadGen`**: a **multi-threaded, rate-controlled** Kafka producer that prints **throughput** and **producer acknowledgment latencies** (p50 / p95 / p99) each second after warmup.
 
-## What it models
+## What it does
 
-- **Dedicated mode (`mode=DEDICATED`)** — messages carry **synthetic keys**. With `hotRatio>0`, keys follow a **skewed distribution**: a fixed hot key (`HOT`) receives that fraction of traffic; the rest are spread across a large key space (`COLD-*`). This captures **static skew** (one persistent hot key).
-- **Random mode (`mode=RANDOM`)** — uses `RandomPartitioner` with **null keys** so records spread randomly across partitions (useful as a spread baseline).
+- Sends fixed-size payloads to a topic at a target **messages-per-second** across **worker threads**.
+- In **dedicated** mode, every message has a **string key** so the broker’s partitioner decides routing.
+- In **random** mode, keys are **null** and **`RandomPartitioner`** spreads records across partitions.
 
-For **dynamic skew** where the hot key **moves over time** (the paper’s moving–hot-key scenario), use the standalone driver in the repo root: **`workload/dynamic-skew-generator.java`** with `SKEW_PARTITIONER=default|adaptive`, or `./experiments/run-moving-hotkey.sh`.
+## Skew and moving hot keys
 
-## Running
+- **Static skew (this module):** With **`mode=DEDICATED`** and **`hotRatio > 0`**, a **single persistent hot key** (`HOT`) receives that fraction of traffic; the rest use **`COLD-*`** keys over a large space. Use this for **steady hot-spot** baselines (e.g. default hash vs **adaptive** in `producer/AdaptivePartitioner.java`).
+- **Dynamic / moving hot key (paper scenario):** The hot key **changes over time** in **`../workload/dynamic-skew-generator.java`**, or run **`../experiments/run-moving-hotkey.sh`** from the repo root. That path is what you want for **shifting skew** experiments.
 
-From `loadgen/`:
+## How to run (from this repo)
 
 ```bash
+cd loadgen
 mvn -q exec:java -Dexec.args="bootstrap=localhost:9092 topic=skew-topic mode=DEDICATED threads=2 messagesPerSecond=50000 payloadSize=512 hotRatio=0.2 warmupSec=10 runSec=60"
 ```
 
-Arguments are `key=value`: `bootstrap`, `topic`, `mode`, `threads`, `messagesPerSecond`, `payloadSize`, `hotRatio`, `warmupSec`, `runSec`.
+Arguments are **`key=value`**: `bootstrap`, `topic`, `mode` (`DEDICATED` | `RANDOM`), `threads`, `messagesPerSecond`, `payloadSize`, `hotRatio`, `warmupSec`, `runSec`.
 
-For an end-to-end path (broker, topic, consumer, lag file, this loadgen), see **`experiments/run_experiment.sh`** at the repository root.
+For broker + topic + background consumer + lag sampling + this loadgen, use **`experiments/run_experiment.sh`** at the repository root.
