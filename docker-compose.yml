@@ -1,8 +1,7 @@
-# Single-node KRaft broker (Apache Kafka docker example).
-# Upstream:
-#   https://github.com/apache/kafka/blob/trunk/docker/examples/docker-compose-files/single-node/plaintext/docker-compose.yml
+# Apache Kafka single-node KRaft broker (plain example).
+# Source: https://github.com/apache/kafka/blob/trunk/docker/examples/docker-compose-files/single-node/plaintext/docker-compose.yml
 #
-# Pinned for reproducibility: apache/kafka:4.0.1 (not :latest). Override: KAFKA_IMAGE.
+# Reproducibility: image defaults to apache/kafka:4.0.1 (not :latest). Set KAFKA_IMAGE to override.
 
 services:
   broker:
@@ -11,8 +10,8 @@ services:
     container_name: ${KAFKA_CONTAINER_NAME:-apskew-broker}
     ports:
       - "9092:9092"
-
     environment:
+      # --- Node / listeners ---
       KAFKA_NODE_ID: 1
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_HOST://localhost:9092,PLAINTEXT://broker:19092
@@ -22,6 +21,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      # --- Topics / transactions (single broker) ---
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1

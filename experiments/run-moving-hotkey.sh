@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 #
-# Moving hot-key experiment: one strategy (STRATEGY) or sweep default+adaptive (RUN_ALL_STRATEGIES=1).
-# Output: results/moving-hotkey/<YYYYMMDD_HHMMSS>_<pid>_<strategy>/
-#   metadata.txt, lag_timeseries.tsv
+# Moving hot-key experiment.
+#
+# One strategy: set STRATEGY (default | adaptive).
+# Sweep: RUN_ALL_STRATEGIES=1 runs default then adaptive (separate result dirs).
+#
+# Results:
+#   results/moving-hotkey/<YYYYMMDD_HHMMSS>_<pid>_<strategy>/
+#     metadata.txt
+#     lag_timeseries.tsv
 #
 set -euo pipefail
 
@@ -10,29 +16,24 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib.sh
 source "$ROOT/scripts/lib.sh"
 
-# =============================================================================
-# Edit these parameters for paper runs
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Settings (edit for paper runs; one variable per line)
+# -----------------------------------------------------------------------------
 
-# --- Kafka / topic ---
 BOOTSTRAP_SERVERS="${BOOTSTRAP_SERVERS:-localhost:9092}"
 TOPIC="${TOPIC:-moving-hotkey}"
 PARTITIONS="${PARTITIONS:-6}"
-# Fresh consumer group per run avoids mixing lag across sequential strategies
 CONSUMER_GROUP_BASE="${CONSUMER_GROUP_BASE:-moving-hotkey}"
 LAG_INTERVAL_SEC="${LAG_INTERVAL_SEC:-2}"
 
-# --- Workload (workload/dynamic-skew-generator.java) ---
 MESSAGES="${MESSAGES:-500000}"
 PHASE_MS="${PHASE_MS:-5000}"
 HOT_FRACTION="${HOT_FRACTION:-0.5}"
 KEY_SPACE="${KEY_SPACE:-10000}"
 
-# --- Partitioner strategy ---
 STRATEGY="${STRATEGY:-adaptive}"
 RUN_ALL_STRATEGIES="${RUN_ALL_STRATEGIES:-0}"
 
-# --- AdaptivePartitioner (-D passed to JVM; ignored for STRATEGY=default) ---
 ADAPTIVE_ENABLE="${ADAPTIVE_ENABLE:-true}"
 ADAPTIVE_WINDOW_MS="${ADAPTIVE_WINDOW_MS:-10000}"
 ADAPTIVE_STICKY_TTL_MS="${ADAPTIVE_STICKY_TTL_MS:-30000}"
@@ -40,12 +41,11 @@ ADAPTIVE_IMBALANCE_FACTOR="${ADAPTIVE_IMBALANCE_FACTOR:-1.25}"
 ADAPTIVE_LOG_ENABLE="${ADAPTIVE_LOG_ENABLE:-false}"
 ADAPTIVE_LOG_SUMMARY_MS="${ADAPTIVE_LOG_SUMMARY_MS:-0}"
 
-# --- Infrastructure ---
 START_DOCKER="${START_DOCKER:-1}"
 
-# =============================================================================
-# Helpers
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Metadata
+# -----------------------------------------------------------------------------
 
 write_metadata() {
   local out_dir="$1"
@@ -73,6 +73,10 @@ write_metadata() {
   } | tee "$meta"
 }
 
+# -----------------------------------------------------------------------------
+# Build and producer
+# -----------------------------------------------------------------------------
+
 build_and_run_producer() {
   local strategy="$1"
   java \
@@ -88,45 +92,6 @@ build_and_run_producer() {
     "$BOOTSTRAP_SERVERS" "$TOPIC" "$MESSAGES" "$PHASE_MS" "$HOT_FRACTION" "$KEY_SPACE"
 }
 
-run_one_strategy() {
-  local strategy="$1"
-  local stamp_base="${2:-$(date +%Y%m%d_%H%M%S)}"
-  local STAMP="${stamp_base}_$$"
-  local OUT="${ROOT}/results/moving-hotkey/${STAMP}_${strategy}"
-  mkdir -p "$OUT"
-
-  local CONSUMER_GROUP="${CONSUMER_GROUP_BASE}-${STAMP}_${strategy}"
-  local LAG_FILE="${OUT}/lag_timeseries.tsv"
-  local lag_pid="" cons_pid=""
-
-  write_metadata "$OUT" "$strategy"
-
-  cleanup() {
-    [[ -n "${lag_pid:-}" ]] && kill "$lag_pid" 2>/dev/null || true
-    [[ -n "${cons_pid:-}" ]] && kill "$cons_pid" 2>/dev/null || true
-  }
-  trap cleanup EXIT
-
-  # Step A: background consumer + lag sampler (isolated group for this strategy)
-  TOPIC="$TOPIC" CONSUMER_GROUP="$CONSUMER_GROUP" \
-    "$ROOT/scripts/start-background-consumer.sh" &
-  cons_pid=$!
-  sleep 2
-  "$ROOT/scripts/collect-lag.sh" "$CONSUMER_GROUP" "$LAG_INTERVAL_SEC" "$LAG_FILE" &
-  lag_pid=$!
-
-  # Step B: producer workload
-  build_and_run_producer "$strategy"
-
-  cleanup
-  trap - EXIT
-
-  echo ""
-  echo "Run finished: ${OUT}"
-  echo "  metadata.txt  lag_timeseries.tsv"
-  echo "  python3 \"$ROOT/plots/generate_plots.py\" --lag-ts \"$LAG_FILE\" --lag-out \"$OUT/lag.png\""
-}
-
 prepare_build() {
   BUILD="$ROOT/build/moving-hotkey"
   CLASSES="$BUILD/classes"
@@ -139,13 +104,57 @@ prepare_build() {
     "$ROOT/workload/dynamic-skew-generator.java"
 }
 
+# -----------------------------------------------------------------------------
+# One strategy run: consumer, lag file, producer, teardown
+# -----------------------------------------------------------------------------
+
+run_one_strategy() {
+  local strategy="$1"
+  local stamp_base="${2:-$(date +%Y%m%d_%H%M%S)}"
+  local STAMP="${stamp_base}_$$"
+  local OUT="${ROOT}/results/moving-hotkey/${STAMP}_${strategy}"
+  mkdir -p "$OUT"
+
+  local CONSUMER_GROUP="${CONSUMER_GROUP_BASE}-${STAMP}_${strategy}"
+  local LAG_FILE="${OUT}/lag_timeseries.tsv"
+  local lag_pid=""
+  local cons_pid=""
+
+  write_metadata "$OUT" "$strategy"
+
+  cleanup() {
+    [[ -n "${lag_pid:-}" ]] && kill "$lag_pid" 2>/dev/null || true
+    [[ -n "${cons_pid:-}" ]] && kill "$cons_pid" 2>/dev/null || true
+  }
+  trap cleanup EXIT
+
+  # Consumer and lag sampler (fresh group per run / per strategy)
+  TOPIC="$TOPIC" CONSUMER_GROUP="$CONSUMER_GROUP" \
+    "$ROOT/scripts/start-background-consumer.sh" &
+  cons_pid=$!
+  sleep 2
+  "$ROOT/scripts/collect-lag.sh" "$CONSUMER_GROUP" "$LAG_INTERVAL_SEC" "$LAG_FILE" &
+  lag_pid=$!
+
+  build_and_run_producer "$strategy"
+
+  cleanup
+  trap - EXIT
+
+  echo ""
+  echo "Run finished: ${OUT}"
+  echo "  metadata.txt"
+  echo "  lag_timeseries.tsv"
+  echo "  python3 \"$ROOT/plots/generate_plots.py\" --lag-ts \"$LAG_FILE\" --lag-out \"$OUT/lag.png\""
+}
+
+# -----------------------------------------------------------------------------
+# Main: broker ready, topic exists, compile once, execute
+# -----------------------------------------------------------------------------
+
 first_broker="${BOOTSTRAP_SERVERS%%,*}"
 KAFKA_WAIT_HOST="${first_broker%%:*}"
 KAFKA_WAIT_PORT="${first_broker##*:}"
-
-# =============================================================================
-# Main: broker + topic once, then one or two strategy runs
-# =============================================================================
 
 if [[ "$START_DOCKER" == 1 ]] && [[ -z "${KAFKA_HOME:-}" ]]; then
   "$ROOT/scripts/kafka-setup.sh"
