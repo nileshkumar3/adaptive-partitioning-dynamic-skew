@@ -68,10 +68,16 @@ def main() -> None:
         default=None,
         help="Output PNG for lag series (default plots/lag.png)",
     )
+    ap.add_argument(
+        "--lag-ts",
+        type=Path,
+        default=None,
+        help="Lag TSV path (default results/lag_timeseries.tsv)",
+    )
     args = ap.parse_args()
     results = args.root / "results"
     tp_path = results / "throughput.txt"
-    lag_path = results / "lag_timeseries.tsv"
+    lag_path = args.lag_ts or (results / "lag_timeseries.tsv")
 
     try:
         import matplotlib

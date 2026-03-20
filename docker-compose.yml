@@ -1,8 +1,10 @@
 # Single-node KRaft broker; adapted from Apache Kafka docker examples.
 # https://github.com/apache/kafka/blob/trunk/docker/examples/docker-compose-files/single-node/plaintext/docker-compose.yml
+#
+# Pinned image (not :latest) so paper runs stay reproducible across pulls.
 services:
   broker:
-    image: ${KAFKA_IMAGE:-apache/kafka:latest}
+    image: ${KAFKA_IMAGE:-apache/kafka:4.0.1}
     hostname: broker
     container_name: ${KAFKA_CONTAINER_NAME:-apskew-broker}
     ports:

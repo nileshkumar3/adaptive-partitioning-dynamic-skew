@@ -27,7 +27,8 @@ class DynamicSkewGenerator {
         p.put("bootstrap.servers", bootstrap);
         p.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
         p.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-        // p.put("partitioner.class", "producer.AdaptivePartitioner"); // + producer/ on classpath
+        // skew.partitioner=adaptive | default (system property or env SKEW_PARTITIONER); tuning via -Dadaptive.*
+        applyPartitionerStrategy(p);
         p.put("linger.ms", "5");
         p.put("batch.size", "65536");
         p.put("acks", "1");
@@ -62,6 +63,17 @@ class DynamicSkewGenerator {
             return "k-" + hotIndex;
         }
         return "k-" + rng.nextInt(keySpace);
+    }
+
+    private static void applyPartitionerStrategy(Properties p) {
+        String mode = System.getProperty("skew.partitioner");
+        if (mode == null || mode.isBlank()) {
+            mode = System.getenv().getOrDefault("SKEW_PARTITIONER", "default");
+        }
+        if ("adaptive".equalsIgnoreCase(mode.trim())) {
+            p.put("partitioner.class", "producer.AdaptivePartitioner");
+            // Tuning: pass JVM flags -Dadaptive.* (Producer may reject unknown property keys).
+        }
     }
 
     private static String prop(String[] args, int idx, String key, String def) {
