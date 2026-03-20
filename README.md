@@ -1,24 +1,31 @@
 # Adaptive Partitioning under Dynamic Workload Skew in Event-Driven Systems
 
-Research artifact for the paper **“Adaptive Partitioning under Dynamic Workload Skew in Event-Driven Systems”**: a minimal Kafka producer partitioner that reacts to **short-window** load imbalance, a moving–hot-key workload, scripts to run Kafka locally, collect consumer-group lag, and plot results.
+**Summary:** Research artifact for studying a producer-side adaptive Kafka partitioner under **moving hot keys** and skewed workloads: Docker Kafka, workloads, lag collection, and plots.
 
-## Repository layout
+## Quickstart
 
-| Path | Role |
-|------|------|
-| `producer/AdaptivePartitioner.java` | Custom `Partitioner`: hash routing when balanced, optional reroute when the hash partition is hot vs. recent mean; sticky TTL; configurable window. |
-| `workload/dynamic-skew-generator.java` | Moving hot key + configurable skew (phase length, hot fraction); `SKEW_PARTITIONER=default\|adaptive`. |
-| `loadgen/` | Maven throughput/latency load generator (skewed keys, dedicated vs random mode) for additional baselines. |
-| `docker-compose.yml` | Single-node KRaft broker (image version pinned). |
-| `scripts/` | Kafka setup, topic creation, background consumer, lag sampling. |
-| `experiments/` | `run-moving-hotkey.sh`, `run_experiment.sh`, sweeps. |
-| `results/` | Example / run outputs (lag TSV, throughput tables). |
-| `plots/generate_plots.py` | Bar chart for `throughput.txt`; time series for `lag_timeseries.tsv` (use `--lag-ts` for per-run files). |
-| `paper/` | LaTeX draft. |
+**Prerequisites:** Docker, Java **21+**, Maven, Python **3** + matplotlib.
+
+From the repo root:
+
+```bash
+./scripts/kafka-setup.sh
+export TOPIC=${TOPIC:-moving-hotkey} PARTITIONS=${PARTITIONS:-6}
+./scripts/create-topic.sh
+chmod +x experiments/run-moving-hotkey.sh    # once
+./experiments/run-moving-hotkey.sh             # or RUN_ALL_STRATEGIES=1 for default + adaptive
+```
+
+Then plot using the path the script prints, e.g.:
+
+```bash
+python3 plots/generate_plots.py --lag-ts results/moving-hotkey/<run_dir>/lag_timeseries.tsv \
+  --lag-out results/moving-hotkey/<run_dir>/lag.png
+```
 
 ## Reproducible paper run
 
-Use the **same** shell for the sequence below (from the repository root). `docker-compose.yml` pins the broker image (**`apache/kafka:4.0.1`** by default); override with `KAFKA_IMAGE` only if you document the change.
+Run the full sequence in **one shell** (repo root). The broker image defaults to **`apache/kafka:4.0.1`** in `docker-compose.yml`; override with `KAFKA_IMAGE` only if you document it.
 
 ```bash
 # 1) Broker
@@ -28,53 +35,65 @@ Use the **same** shell for the sequence below (from the repository root). `docke
 export TOPIC=${TOPIC:-moving-hotkey} PARTITIONS=${PARTITIONS:-6}
 ./scripts/create-topic.sh
 
-# 3–4) Moving–hot-key load + consumer + lag (script starts consumer and sampler)
+# 3–4) Moving hot key + consumer + lag (script starts consumer and sampler)
 chmod +x experiments/run-moving-hotkey.sh   # once
-RUN_ALL_STRATEGIES=1 ./experiments/run-moving-hotkey.sh   # default then adaptive; or STRATEGY=adaptive only
+RUN_ALL_STRATEGIES=1 ./experiments/run-moving-hotkey.sh    # default then adaptive; or STRATEGY=adaptive only
 
-# 5) Plot (use the path printed at end of the run, or list results/moving-hotkey/)
+# 5) Plot
 python3 plots/generate_plots.py --lag-ts results/moving-hotkey/<run_dir>/lag_timeseries.tsv \
   --lag-out results/moving-hotkey/<run_dir>/lag.png
 ```
 
-Each run directory includes **`metadata.txt`** (`git_commit`, strategy, topic, partitions, workload and adaptive settings) and **`lag_timeseries.tsv`**.
+Each run directory has **`metadata.txt`** (`git_commit`, strategy, topic, partitions, workload and adaptive settings) and **`lag_timeseries.tsv`**.
 
-**Paper runs:** keep **`adaptive.log.enable=false`** (default). Per-record stderr traces dominate I/O; for lightweight telemetry set **`adaptive.log.summary.ms`** to an interval (e.g. `10000`) instead of enabling per-record logging.
+**Paper runs:** keep **`adaptive.log.enable=false`** (default). For aggregate routing lines without per-record spam, set **`adaptive.log.summary.ms`** (e.g. `10000`).
 
-**Repository metadata:** the GitHub **description** and **topics** for this artifact must be set manually in the repo **Settings** (they are not stored in these files).
+**GitHub:** set the repo **description** and **topics** in **Settings** (not stored in git).
 
-## Quickstart (reference)
+## Repository layout
 
-**Prerequisites:** Docker (for broker), Java 21+ and Maven (for classpath + `loadgen`), Python 3 + matplotlib for plots.
+| Path | Role |
+|------|------|
+| `producer/AdaptivePartitioner.java` | Custom partitioner: hash when balanced, optional reroute vs window mean; sticky TTL; config window. |
+| `workload/dynamic-skew-generator.java` | Moving hot key + skew (`SKEW_PARTITIONER=default\|adaptive`). |
+| `loadgen/` | Maven load generator (static skew, throughput / latency stats). |
+| `docker-compose.yml` | Single-node KRaft broker (pinned image). |
+| `scripts/` | Setup, topic, background consumer, lag sampling. |
+| `experiments/` | `run-moving-hotkey.sh`, `run_experiment.sh`, sweeps. |
+| `results/` | Example / run outputs (may be committed as samples). |
+| `plots/generate_plots.py` | Throughput bar chart; lag series (`--lag-ts` for per-run TSV). |
+| `paper/` | LaTeX draft. |
 
-`run-moving-hotkey.sh` starts Kafka only if `START_DOCKER=1` (default) and `KAFKA_HOME` is unset; it creates the topic, compiles `producer/` + `workload/`, runs the moving-hot-key driver, and writes under `results/moving-hotkey/`.
+## Reference
 
-Manual lag sampling if needed:
+`run-moving-hotkey.sh` uses Docker when `START_DOCKER=1` (default) and `KAFKA_HOME` is unset; it compiles `producer/` + `workload/` and writes under **`results/moving-hotkey/<timestamp>_<pid>_<strategy>/`**.
+
+Manual lag sampling:
 
 ```bash
 ./scripts/collect-lag.sh <group_id> 2 results/lag_timeseries.tsv
 ```
 
-Default throughput + lag overview:
+Default plots (throughput + default lag path):
 
 ```bash
 python3 plots/generate_plots.py
 ```
 
-## Adaptive partitioner configuration
+## Adaptive partitioner (`adaptive.*`)
 
-`AdaptivePartitioner` reads **`adaptive.*` from the partitioner `configure` map when Kafka forwards those entries, and otherwise from Java system properties** (recommended for runs: `-Dadaptive.window.ms=…`).
+Values come from the partitioner **configure** map when present, else **`System.getProperty`** (e.g. `-Dadaptive.window.ms=…` in experiment scripts).
 
 | Key | Meaning |
 |-----|---------|
-| `adaptive.enable` | `true` / `false` — if `false`, murmur2 routing (null keys: random). |
-| `adaptive.sticky.ttl.ms` | How long a key stays pinned to a chosen partition. |
-| `adaptive.imbalance.factor` | Reroute if hash-partition window load `> mean × factor`. |
-| `adaptive.window.ms` | Sliding window length for load counters (`≤0` = never reset). |
-| `adaptive.log.enable` | `true` prints one stderr line per record (heavy); use short runs only. |
-| `adaptive.log.summary.ms` | If `> 0`, one stderr **summary** line per interval (route counts + sticky map size); use instead of per-record logs for long runs. |
+| `adaptive.enable` | `true` / `false` — if `false`, murmur2 (null keys: random). |
+| `adaptive.sticky.ttl.ms` | Sticky routing TTL per key. |
+| `adaptive.imbalance.factor` | Reroute when hash-partition load `> mean × factor`. |
+| `adaptive.window.ms` | Load window length (`≤0` = no epoch reset). |
+| `adaptive.log.enable` | Per-record stderr (heavy). |
+| `adaptive.log.summary.ms` | If `> 0`, periodic summary line (routes + sticky map size). |
 
-**Paper caveat:** rerouting breaks strict single-partition ordering per key; sticky TTL trades skew vs. ordering.
+**Caveat:** rerouting weakens strict per-key single-partition ordering.
 
 ## License
 

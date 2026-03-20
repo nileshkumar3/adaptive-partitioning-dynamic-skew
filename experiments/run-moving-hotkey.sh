@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# Moving hot key experiment: run once (STRATEGY) or sweep default+adaptive (RUN_ALL_STRATEGIES=1).
+# Moving hot-key experiment: one strategy (STRATEGY) or sweep default+adaptive (RUN_ALL_STRATEGIES=1).
+# Output: results/moving-hotkey/<YYYYMMDD_HHMMSS>_<pid>_<strategy>/
+#   metadata.txt, lag_timeseries.tsv
 #
 set -euo pipefail
 
@@ -8,33 +10,42 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib.sh
 source "$ROOT/scripts/lib.sh"
 
-# --------------------------- edit experiment parameters ---------------------------
+# =============================================================================
+# Edit these parameters for paper runs
+# =============================================================================
+
+# --- Kafka / topic ---
 BOOTSTRAP_SERVERS="${BOOTSTRAP_SERVERS:-localhost:9092}"
 TOPIC="${TOPIC:-moving-hotkey}"
 PARTITIONS="${PARTITIONS:-6}"
-# Per-run suffix added below so lag/offsets do not mix across sequential strategies
+# Fresh consumer group per run avoids mixing lag across sequential strategies
 CONSUMER_GROUP_BASE="${CONSUMER_GROUP_BASE:-moving-hotkey}"
 LAG_INTERVAL_SEC="${LAG_INTERVAL_SEC:-2}"
 
+# --- Workload (workload/dynamic-skew-generator.java) ---
 MESSAGES="${MESSAGES:-500000}"
 PHASE_MS="${PHASE_MS:-5000}"
 HOT_FRACTION="${HOT_FRACTION:-0.5}"
 KEY_SPACE="${KEY_SPACE:-10000}"
 
+# --- Partitioner strategy ---
 STRATEGY="${STRATEGY:-adaptive}"
-# 1 = run "default" then "adaptive" in separate timestamped directories (Kafka/topic once)
 RUN_ALL_STRATEGIES="${RUN_ALL_STRATEGIES:-0}"
 
+# --- AdaptivePartitioner (-D passed to JVM; ignored for STRATEGY=default) ---
 ADAPTIVE_ENABLE="${ADAPTIVE_ENABLE:-true}"
 ADAPTIVE_WINDOW_MS="${ADAPTIVE_WINDOW_MS:-10000}"
 ADAPTIVE_STICKY_TTL_MS="${ADAPTIVE_STICKY_TTL_MS:-30000}"
 ADAPTIVE_IMBALANCE_FACTOR="${ADAPTIVE_IMBALANCE_FACTOR:-1.25}"
 ADAPTIVE_LOG_ENABLE="${ADAPTIVE_LOG_ENABLE:-false}"
-# 0 = off; e.g. 10000 = one summary line every 10s (see AdaptivePartitioner)
 ADAPTIVE_LOG_SUMMARY_MS="${ADAPTIVE_LOG_SUMMARY_MS:-0}"
 
+# --- Infrastructure ---
 START_DOCKER="${START_DOCKER:-1}"
-# ---------------------------------------------------------------------------------
+
+# =============================================================================
+# Helpers
+# =============================================================================
 
 write_metadata() {
   local out_dir="$1"
@@ -96,7 +107,7 @@ run_one_strategy() {
   }
   trap cleanup EXIT
 
-  # Consumer + lag for this strategy only (fresh group id)
+  # Step A: background consumer + lag sampler (isolated group for this strategy)
   TOPIC="$TOPIC" CONSUMER_GROUP="$CONSUMER_GROUP" \
     "$ROOT/scripts/start-background-consumer.sh" &
   cons_pid=$!
@@ -104,7 +115,9 @@ run_one_strategy() {
   "$ROOT/scripts/collect-lag.sh" "$CONSUMER_GROUP" "$LAG_INTERVAL_SEC" "$LAG_FILE" &
   lag_pid=$!
 
+  # Step B: producer workload
   build_and_run_producer "$strategy"
+
   cleanup
   trap - EXIT
 
@@ -130,12 +143,16 @@ first_broker="${BOOTSTRAP_SERVERS%%,*}"
 KAFKA_WAIT_HOST="${first_broker%%:*}"
 KAFKA_WAIT_PORT="${first_broker##*:}"
 
-# Broker + topic once before sweeps
+# =============================================================================
+# Main: broker + topic once, then one or two strategy runs
+# =============================================================================
+
 if [[ "$START_DOCKER" == 1 ]] && [[ -z "${KAFKA_HOME:-}" ]]; then
   "$ROOT/scripts/kafka-setup.sh"
 else
   wait_for_kafka "$KAFKA_WAIT_HOST" "$KAFKA_WAIT_PORT" 60
 fi
+
 TOPIC="$TOPIC" PARTITIONS="$PARTITIONS" "$ROOT/scripts/create-topic.sh"
 
 prepare_build
