@@ -1,6 +1,7 @@
 package producer;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,10 +21,12 @@ import org.apache.kafka.common.utils.Utils;
  * flip-flopping per key. When adaptation is off, behavior matches default hash routing (plus a
  * simple random choice for null keys), without maintaining window counts.
  *
- * <p>Experiment behavior: {@link #leastLoadedPartition(int)} only <em>selects</em> a partition (no counter
+ * <p>Experiment behavior: {@link #argminPartition(int)} only <em>selects</em> a partition (no counter
  * updates). Exactly one {@code windowCounts} increment happens per routed record via {@link #recordOnce}.
- * Least-loaded ties use uniform random choice among equal minima. {@code adaptive.window.ms} {@literal >} 0
- * resets counts on a wall-clock epoch; {@code <= 0} disables that reset (cumulative window — see field).
+ * Argmin ties are broken fairly so experiments do not artificially favor low partition ids.
+ * Opportunistic sticky eviction limits map growth without scanning every key on every record.
+ * {@code adaptive.window.ms} {@literal >} 0 resets counts on a wall-clock epoch; {@code <= 0} disables that
+ * reset (cumulative window — see field).
  */
 public class AdaptivePartitioner implements Partitioner {
 
@@ -34,6 +37,8 @@ public class AdaptivePartitioner implements Partitioner {
     private static final long DEFAULT_WINDOW_MS = 10_000L;
     private static final boolean DEFAULT_LOG_ENABLE = false;
     private static final long DEFAULT_LOG_SUMMARY_MS = 0L;
+    /** Max expired entries removed per rare opportunistic prune (bounded work). */
+    private static final int STICKY_OPPORTUNISTIC_MAX_REMOVALS = 128;
 
     public static final String ADAPTIVE_ENABLE = "adaptive.enable";
     public static final String ADAPTIVE_STICKY_TTL_MS = "adaptive.sticky.ttl.ms";
@@ -116,7 +121,7 @@ public class AdaptivePartitioner implements Partitioner {
         maybeOpportunisticPruneStickies(now);
 
         if (keyBytes == null) {
-            int p = leastLoadedPartition(n);
+            int p = argminPartition(n);
             recordOnce(p, "NULL_KEY_LEAST_LOADED", "null key → least-loaded partition", keyBytes);
             maybeSummary();
             return p;
@@ -130,6 +135,7 @@ public class AdaptivePartitioner implements Partitioner {
                 maybeSummary();
                 return sticky.partition;
             }
+            // Per-key opportunistic removal: expired stickies should not linger until close().
             stickyByKey.remove(keyStr, sticky);
         }
 
@@ -145,7 +151,7 @@ public class AdaptivePartitioner implements Partitioner {
             return hashPart;
         }
 
-        int alt = leastLoadedPartition(n);
+        int alt = argminPartition(n);
         stickyByKey.put(keyStr, new Sticky(alt, now));
         recordOnce(
                 alt,
@@ -254,21 +260,35 @@ public class AdaptivePartitioner implements Partitioner {
     }
 
     /**
-     * Periodic purge of TTL-expired stickies (cheap full map scan at low rate). Catches entries for keys
-     * that never reappear, and covers {@code adaptive.window.ms <= 0} where window rollover never runs.
+     * Rare bounded pass: drops at most {@link #STICKY_OPPORTUNISTIC_MAX_REMOVALS} expired stickies so keys
+     * that never reappear do not grow {@link #stickyByKey} forever, without a full-map scan each time.
      */
     private void maybeOpportunisticPruneStickies(long now) {
+        // ~1 / 8192 calls: cheap enough for long experiments; avoids full-map scans every record.
         if ((stickyPrunePhase.incrementAndGet() & 0x1FFF) != 0) {
             return;
         }
         synchronized (windowLock) {
-            pruneExpiredStickies(now);
+            pruneExpiredStickiesBounded(now, STICKY_OPPORTUNISTIC_MAX_REMOVALS);
         }
     }
 
-    /** Remove stickies past TTL (safe to call under {@link #windowLock}). */
+    /** Full purge on window epoch (infrequent). */
     private void pruneExpiredStickies(long now) {
         stickyByKey.entrySet().removeIf(e -> now - e.getValue().sinceMs >= stickyTtlMs);
+    }
+
+    /** Iterator-based partial purge (bounded work per call). */
+    private void pruneExpiredStickiesBounded(long now, int maxRemovals) {
+        int removed = 0;
+        Iterator<Map.Entry<String, Sticky>> it = stickyByKey.entrySet().iterator();
+        while (it.hasNext() && removed < maxRemovals) {
+            Map.Entry<String, Sticky> e = it.next();
+            if (now - e.getValue().sinceMs >= stickyTtlMs) {
+                it.remove();
+                removed++;
+            }
+        }
     }
 
     private void ensureCounters(int n) {
@@ -297,18 +317,21 @@ public class AdaptivePartitioner implements Partitioner {
     }
 
     /**
-     * Chooses a least-loaded partition from current {@link #windowCounts} only — does <b>not</b> increment.
-     * Ties: uniform random among equal minima (one pass).
+     * Partition with minimum {@link #windowCounts} (no increment here — {@link #recordOnce} counts once).
+     * Scans in a random cyclic order so tie-breaking does not correlate with index ordering; among equal
+     * minima, uses uniform reservoir choice (fair, no bias to partition 0).
      */
-    private int leastLoadedPartition(int n) {
+    private int argminPartition(int n) {
         if (n <= 0) {
             return 0;
         }
+        ThreadLocalRandom rng = ThreadLocalRandom.current();
+        int start = rng.nextInt(n);
         long min = Long.MAX_VALUE;
         int tieCount = 0;
         int chosen = 0;
-        ThreadLocalRandom rng = ThreadLocalRandom.current();
-        for (int i = 0; i < n; i++) {
+        for (int k = 0; k < n; k++) {
+            int i = (start + k) % n;
             long v = windowCounts.get(i);
             if (v < min) {
                 min = v;
@@ -316,6 +339,7 @@ public class AdaptivePartitioner implements Partitioner {
                 chosen = i;
             } else if (v == min) {
                 tieCount++;
+                // Reservoir: each tie has equal probability 1/tieCount of becoming chosen (uniform among mins).
                 if (rng.nextInt(tieCount) == 0) {
                     chosen = i;
                 }
