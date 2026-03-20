@@ -1,0 +1,6 @@
+# producer / pipeline throughput (example)
+# scenario	msgs_per_s	notes
+uniform-baseline	185000	control
+skew-static	142000	hot partition bound
+skew-dynamic-moving-key	128000	default partitioner
+skew-dynamic-moving-key-adaptive	168000	adaptive partitioner

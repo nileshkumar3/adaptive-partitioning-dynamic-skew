@@ -1,0 +1,32 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+
+\title{Adaptive Partitioning under Dynamic Skew in Stream Processing Workloads}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study Kafka-style stream ingestion when key popularity shifts over time: a moving hot key changes which partition becomes overloaded. A default hash partitioner binds each key to a single partition, which is ideal for per-key ordering but can trap evolving skew on one broker. We describe a lightweight producer-side partitioner that balances short-term stickiness with load steering, and we outline an experimental methodology using a synthetic workload generator with configurable phase and skew intensity.
+\end{abstract}
+
+\section{Introduction}
+Log-structured publish--subscribe systems partition topics for parallelism and fault tolerance. Hash partitioning colocates all events for a key, preserving consumer semantics at the cost of sensitivity to skew. Real workloads exhibit \emph{dynamic} skew: advertising budgets, trending entities, or regional spikes move the hot key set. We motivate producer-side adaptation that reacts to observed imbalance without requiring cluster topology changes.
+
+\section{Design}
+Let partitions be $\{0,\ldots,P-1\}$. A classical partitioner chooses $h(k) \bmod P$ for key $k$. Our adaptive variant maintains a short TTL \emph{sticky} assignment per key to avoid thrashing ordering, but if the preferred partition's recent count exceeds a slack factor times the mean load, the producer steers the key to the least-loaded partition and refreshes the sticky route.
+
+\section{Methodology}
+We evaluate with a synthetic generator that (i) sends a configurable fraction of traffic to a moving hot key every $\tau$ milliseconds, and (ii) sweeps hot-key fraction for fixed $\tau$. Consumer lag and end-to-end throughput are logged to \texttt{results/} and plotted via \texttt{plots/generate\_plots.py}.
+
+\section{Results}
+Populate \texttt{results/lag.txt} and \texttt{results/throughput.txt} with measured trials; figures go in \texttt{plots/}.
+
+\section{Conclusion}
+Producer-side adaptive routing is a low-intrusion knob for evolving skew; trade-offs versus strict per-key ordering deserve quantification per application.
+
+\end{document}
