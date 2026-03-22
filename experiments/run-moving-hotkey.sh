@@ -16,19 +16,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib.sh
 source "$ROOT/scripts/lib.sh"
 
+kafka_require
+
 # =============================================================================
 # Settings (one assignment per line; edit for paper runs)
 # =============================================================================
 
-# --- Kafka / topic ---
-BOOTSTRAP_SERVERS="${BOOTSTRAP_SERVERS:-localhost:9092}"
+# --- Kafka / topic (BOOTSTRAP_* defaults live in scripts/lib.sh) ---
 TOPIC="${TOPIC:-moving-hotkey}"
 PARTITIONS="${PARTITIONS:-6}"
-CONSUMER_GROUP_BASE="${CONSUMER_GROUP_BASE:-moving-hotkey}"
+CONSUMER_GROUP_BASE="${CONSUMER_GROUP_BASE:-${GROUP_ID:-moving-hotkey}}"
 LAG_INTERVAL_SEC="${LAG_INTERVAL_SEC:-2}"
 
 # --- Workload (workload/dynamic-skew-generator.java) ---
-MESSAGES="${MESSAGES:-500000}"
+MESSAGES="${MESSAGES:-${MSG_RATE:-500000}}"
 PHASE_MS="${PHASE_MS:-5000}"
 HOT_FRACTION="${HOT_FRACTION:-0.5}"
 KEY_SPACE="${KEY_SPACE:-10000}"
@@ -45,8 +46,8 @@ ADAPTIVE_IMBALANCE_FACTOR="${ADAPTIVE_IMBALANCE_FACTOR:-1.25}"
 ADAPTIVE_LOG_ENABLE="${ADAPTIVE_LOG_ENABLE:-false}"
 ADAPTIVE_LOG_SUMMARY_MS="${ADAPTIVE_LOG_SUMMARY_MS:-0}"
 
-# --- Infrastructure ---
-START_DOCKER="${START_DOCKER:-1}"
+# --- Output root (optional) ---
+RESULTS_PARENT="${OUT_DIR:-$ROOT/results/moving-hotkey}"
 
 # =============================================================================
 # Metadata (writes metadata.txt)
@@ -62,6 +63,7 @@ write_metadata() {
     echo "git_commit=${git_commit}"
     echo "strategy=${strategy}"
     echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "KAFKA_HOME=${KAFKA_HOME}"
     echo "BOOTSTRAP_SERVERS=${BOOTSTRAP_SERVERS}"
     echo "topic=${TOPIC}"
     echo "partitions=${PARTITIONS}"
@@ -117,27 +119,31 @@ run_one_strategy() {
   local strategy="$1"
   local stamp_base="${2:-$(date +%Y%m%d_%H%M%S)}"
   local STAMP="${stamp_base}_$$"
-  local OUT="${ROOT}/results/moving-hotkey/${STAMP}_${strategy}"
+  local OUT="${RESULTS_PARENT}/${STAMP}_${strategy}"
   mkdir -p "$OUT"
 
   local CONSUMER_GROUP="${CONSUMER_GROUP_BASE}-${STAMP}_${strategy}"
   local LAG_FILE="${OUT}/lag_timeseries.tsv"
   local lag_pid=""
-  local cons_pid=""
+  local safe_group="${CONSUMER_GROUP//\//_}"
+  local cons_runtime="${ROOT}/results/runtime/${safe_group}"
 
   write_metadata "$OUT" "$strategy"
 
   cleanup() {
     [[ -n "${lag_pid:-}" ]] && kill "$lag_pid" 2>/dev/null || true
-    [[ -n "${cons_pid:-}" ]] && kill "$cons_pid" 2>/dev/null || true
+    if [[ -f "${cons_runtime}/pids.txt" ]]; then
+      while read -r pid; do
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+      done <"${cons_runtime}/pids.txt"
+      rm -f "${cons_runtime}/pids.txt"
+    fi
   }
   trap cleanup EXIT
 
-  TOPIC="$TOPIC" CONSUMER_GROUP="$CONSUMER_GROUP" \
-    "$ROOT/scripts/start-background-consumer.sh" &
-  cons_pid=$!
+  "$ROOT/scripts/start-background-consumer.sh" "$TOPIC" "$CONSUMER_GROUP" 1
   sleep 2
-  "$ROOT/scripts/collect-lag.sh" "$CONSUMER_GROUP" "$LAG_INTERVAL_SEC" "$LAG_FILE" &
+  "$ROOT/scripts/collect-lag.sh" "$TOPIC" "$CONSUMER_GROUP" "$LAG_INTERVAL_SEC" "$LAG_FILE" &
   lag_pid=$!
 
   build_and_run_producer "$strategy"
@@ -156,15 +162,7 @@ run_one_strategy() {
 # Setup: broker, topic, compile — then run experiment(s)
 # =============================================================================
 
-first_broker="${BOOTSTRAP_SERVERS%%,*}"
-KAFKA_WAIT_HOST="${first_broker%%:*}"
-KAFKA_WAIT_PORT="${first_broker##*:}"
-
-if [[ "$START_DOCKER" == 1 ]] && [[ -z "${KAFKA_HOME:-}" ]]; then
-  "$ROOT/scripts/kafka-setup.sh"
-else
-  wait_for_kafka "$KAFKA_WAIT_HOST" "$KAFKA_WAIT_PORT" 60
-fi
+"$ROOT/scripts/kafka-setup.sh"
 
 TOPIC="$TOPIC" PARTITIONS="$PARTITIONS" "$ROOT/scripts/create-topic.sh"
 

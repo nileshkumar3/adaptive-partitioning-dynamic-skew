@@ -1,21 +1,41 @@
 # Adaptive Partitioning under Dynamic Workload Skew in Event-Driven Systems
 
-**Summary:** Research artifact for a producer-side adaptive Kafka partitioner under **moving hot keys** and skewed workloads: Docker broker, workloads, consumer lag samples, and plots.
+**Summary:** Research artifact for a producer-side adaptive Kafka partitioner under **moving hot keys** and skewed workloads: local (or Docker) broker, workloads, consumer lag samples, and plots.
 
 ---
 
-## Quickstart
+## Local Kafka setup
 
-**Prerequisites:** Docker, Java **21+**, Maven, Python **3**, matplotlib.
+Experiments use the **Kafka command-line tools** from a normal binary install (no Docker required).
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `KAFKA_HOME` | `/Users/nilesh/kafka-lab/kafka_2.13-4.0.1` | Root of your Kafka tarball (must contain `bin/kafka-topics.sh`, etc.) |
+| `BOOTSTRAP_SERVERS` | `localhost:9092` | Broker list for CLI and clients |
+| `BOOTSTRAP_SERVER` | _(unset)_ | Optional single-broker alias; if set, overrides `BOOTSTRAP_SERVERS` |
+
+Start your broker (e.g. KRaft) so it listens on the bootstrap you configure, then:
+
+```bash
+export KAFKA_HOME=/path/to/kafka_2.13-4.0.1   # optional if default matches your machine
+export BOOTSTRAP_SERVERS=localhost:9092      # optional
+./scripts/kafka-setup.sh                     # waits until the port is open
+```
+
+Scripts validate that `$KAFKA_HOME/bin/kafka-topics.sh` exists before running CLI commands.
+
+---
+
+## Quickstart (local broker)
+
+**Prerequisites:** Java **21+**, Maven, Python **3**, matplotlib; **nc** (netcat) for `kafka-setup.sh`; a running Kafka on your bootstrap.
 
 From the repository root:
 
 ```bash
 ./scripts/kafka-setup.sh
 
-export TOPIC=${TOPIC:-moving-hotkey}
-export PARTITIONS=${PARTITIONS:-6}
-./scripts/create-topic.sh
+./scripts/create-topic.sh moving-hotkey 6
 
 chmod +x experiments/run-moving-hotkey.sh   # once
 ./experiments/run-moving-hotkey.sh
@@ -34,29 +54,40 @@ python3 plots/generate_plots.py \
 
 ---
 
+## Helper scripts
+
+| Script | Usage |
+|--------|--------|
+| Create topic | `./scripts/create-topic.sh [TOPIC] [PARTITIONS]` — env: `TOPIC`, `PARTITIONS`, `REPLICATION_FACTOR` (default 1). Idempotent if the topic exists. |
+| Background consumers | `./scripts/start-background-consumer.sh TOPIC GROUP_ID [NUM_CONSUMERS]` — logs and PIDs under `results/runtime/<group>/`. |
+| Stop consumers | `./scripts/stop-runtime-consumers.sh results/runtime/<group>` |
+| Lag samples | `./scripts/collect-lag.sh TOPIC GROUP_ID [INTERVAL_SECONDS] [OUTFILE]` — default interval 5s; TSV with `unix_ts`, `iso_utc`, `total_lag`, … until Ctrl+C. |
+
+---
+
 ## Reproducible paper run
 
 Run **in order** in **one shell** from the repo root.
 
 ### 1. Broker
 
-Image is pinned in `docker-compose.yml` (`apache/kafka:4.0.1` by default). Override with `KAFKA_IMAGE` only if you document it.
+Ensure Kafka is up on `BOOTSTRAP_SERVERS`, then:
 
 ```bash
 ./scripts/kafka-setup.sh
 ```
 
+*(Optional Docker workflow: `docker-compose` is still in the repo if you prefer a containerized broker; scripts do **not** invoke Docker.)*
+
 ### 2. Topic
 
 ```bash
-export TOPIC=${TOPIC:-moving-hotkey}
-export PARTITIONS=${PARTITIONS:-6}
-./scripts/create-topic.sh
+./scripts/create-topic.sh "${TOPIC:-moving-hotkey}" "${PARTITIONS:-6}"
 ```
 
 ### 3. Experiment
 
-Starts background consumer, lag sampler, and producer. Writes under `results/moving-hotkey/`.
+Starts background consumer, lag sampler, and producer. Writes under `results/moving-hotkey/` (or `OUT_DIR` if set).
 
 ```bash
 chmod +x experiments/run-moving-hotkey.sh   # once
@@ -67,6 +98,8 @@ chmod +x experiments/run-moving-hotkey.sh   # once
 # Or: default then adaptive, separate result dirs
 RUN_ALL_STRATEGIES=1 ./experiments/run-moving-hotkey.sh
 ```
+
+Useful environment overrides include: `STRATEGY`, `TOPIC`, `GROUP_ID` / `CONSUMER_GROUP_BASE`, `MESSAGES` (or `MSG_RATE` as an alias for the same total-count knob), `HOT_FRACTION`, `PHASE_MS`, `OUT_DIR`, `ADAPTIVE_ENABLE`, `ADAPTIVE_LOG_ENABLE`, `LAG_INTERVAL_SEC`.
 
 ### 4. Plots
 
@@ -91,8 +124,8 @@ python3 plots/generate_plots.py \
 | `producer/AdaptivePartitioner.java` | Custom partitioner: hash when balanced; optional reroute; sticky TTL; windowed load. |
 | `workload/dynamic-skew-generator.java` | Moving hot key workload (`SKEW_PARTITIONER=default\|adaptive`). |
 | `loadgen/` | Maven load generator (static skew; throughput / latency stats). |
-| `docker-compose.yml` | Single-node KRaft broker (pinned image). |
-| `scripts/` | Broker setup, topic, background consumer, lag sampling. |
+| `docker-compose.yml` | Optional single-node KRaft broker (pinned image). |
+| `scripts/` | Broker wait, topic, background consumer, lag sampling. |
 | `experiments/` | `run-moving-hotkey.sh`, `run_experiment.sh`, sweeps. |
 | `results/` | Example or run outputs (sample files may be committed). |
 | `plots/generate_plots.py` | Throughput chart; lag series (`--lag-ts` for a specific TSV). |
@@ -102,12 +135,12 @@ python3 plots/generate_plots.py \
 
 ## Reference
 
-`experiments/run-moving-hotkey.sh` uses Docker when `START_DOCKER=1` (default) and `KAFKA_HOME` is unset; compiles `producer/` and `workload/`; writes to `results/moving-hotkey/<timestamp>_<pid>_<strategy>/`.
+`experiments/run-moving-hotkey.sh` runs `kafka-setup.sh`, creates the topic, compiles `producer/` and `workload/`, and writes to `results/moving-hotkey/<timestamp>_<pid>_<strategy>/` (unless `OUT_DIR` is set).
 
-**Manual lag sampling:**
+**Loadgen + lag (`run_experiment.sh`):**
 
 ```bash
-./scripts/collect-lag.sh <group_id> 2 results/lag_timeseries.tsv
+experiments/run_experiment.sh bootstrap=localhost:9092 topic=skew-topic mode=DEDICATED threads=2 messagesPerSecond=50000 payloadSize=512 hotRatio=0.2 warmupSec=10 runSec=120
 ```
 
 **Default plot inputs:**

@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
-# Start single-node Kafka via Docker Compose, or verify a host broker is up.
+# Wait until local Kafka accepts connections on BOOTSTRAP_SERVERS (no Docker).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib.sh
 source "$ROOT/scripts/lib.sh"
 
-if [[ "${1:-}" == "down" ]]; then
-  docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml" down
-  exit 0
-fi
+kafka_require
 
-if [[ -n "${KAFKA_HOME:-}" ]]; then
-  echo "KAFKA_HOME is set; skipping Docker. Ensure Kafka is listening on $BOOTSTRAP_SERVERS"
-  wait_for_kafka localhost "${BOOTSTRAP_SERVERS##*:}" 60
-  exit 0
-fi
+first="${BOOTSTRAP_SERVERS%%,*}"
+host="${first%%:*}"
+port="${first##*:}"
 
-echo "Starting Kafka broker (Docker)…"
-docker compose --project-directory "$ROOT" -f "$ROOT/docker-compose.yml" up -d
-wait_for_kafka localhost 9092 90
-echo "Kafka is up on $BOOTSTRAP_SERVERS"
+echo "Using KAFKA_HOME=$KAFKA_HOME"
+echo "Waiting for broker $host:$port …"
+wait_for_kafka "$host" "$port" 90
+echo "Broker reachable at $BOOTSTRAP_SERVERS"
